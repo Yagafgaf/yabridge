@@ -36,6 +36,12 @@ Versioning](https://semver.org/spec/v2.0.0.html).
   plugin host exit with an X11 `BadWindow` error, taking the host down with it.
   This was easy to trigger in **REAPER** by quickly switching between plugins
   in the FX chain window.
+- Fixed audio dropouts and frozen plugin GUIs in **REAPER** when using VST2
+  plugins. REAPER asks every VST2 plugin for its current gain reduction from the
+  audio thread once per processing cycle. yabridge forwarded those queries to
+  the Wine plugin host's GUI thread, so the audio thread had to wait whenever the
+  plugin's GUI was busy. yabridge now answers these queries directly for plugins
+  that don't support PreSonus' gain reduction API.
 
 ### Removed
 
