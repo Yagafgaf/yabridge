@@ -16,8 +16,11 @@
 
 #pragma once
 
+#include <atomic>
 #include <future>
 #include <iomanip>
+#include <stdexcept>
+#include <vector>
 
 #include <sys/resource.h>
 
@@ -410,23 +413,20 @@ class PluginBridge {
     }
 
     /**
-     * Connect the sockets, while starting another thread that will terminate
-     * the plugin (through `std::terminate`/SIGABRT) when the host process fails
-     * to start. This is the only way to stop listening on our sockets without
-     * moving everything over to asynchronous listeners (which may actually be a
-     * good idea just for this use case). Otherwise the plugin would be stuck
-     * loading indefinitely when Wine is not configured correctly.
+     * Connect the sockets, while starting another thread that watches whether
+     * the host process is still running. If the Wine process fails to start
+     * or exits before it connected, then nothing will ever connect to our
+     * sockets and we would be hanging here indefinitely. This used to be
+     * solved by terminating the whole host application through
+     * `std::terminate()`. Instead the watchdog now unblocks the pending
+     * accepts by connecting to the sockets itself, after which this function
+     * throws so the plugin simply fails to load.
      *
-     * TODO: Asynchronously connect our sockets so we can interrupt it, maybe
+     * @throw std::runtime_error If the Wine host exited before connecting.
      */
     void connect_sockets_guarded() {
 #ifndef WITH_WINEDBG
-        // If the Wine process fails to start, then nothing will connect to the
-        // sockets and we'll be hanging here indefinitely. To prevent this,
-        // we'll periodically poll whether the Wine process is still running,
-        // and throw when it is not. The alternative would be to rewrite this to
-        // using `async_accept`, Asio timers, and another IO context, but
-        // I feel like this a much simpler solution.
+        std::atomic_bool host_exited = false;
         host_watchdog_handler_ = std::jthread([&](std::stop_token st) {
             using namespace std::literals::chrono_literals;
 
@@ -434,6 +434,7 @@ class PluginBridge {
 
             while (!st.stop_requested()) {
                 if (!plugin_host_->running()) {
+                    host_exited = true;
                     generic_logger_.log(
                         "The Wine host process has exited unexpectedly. Check "
                         "the output above for more information.");
@@ -448,7 +449,33 @@ class PluginBridge {
                         "see the error.",
                         info_.native_library_path_);
 
-                    std::terminate();
+                    // There's no clean way to interrupt a blocking `accept()`
+                    // from another thread, but a connection of our own
+                    // completes it. Every socket we listen on is already bound
+                    // in the socket directory at this point, so one connection
+                    // to each of them lets `sockets_.connect()` return. These
+                    // sockets stay open until the main thread stops us.
+                    asio::io_context io_context{};
+                    std::vector<asio::local::stream_protocol::socket>
+                        unblocking_sockets{};
+                    std::error_code err;
+                    for (const auto& entry : ghc::filesystem::directory_iterator(
+                             sockets_.base_dir_, err)) {
+                        if (entry.path().extension() != ".sock") {
+                            continue;
+                        }
+
+                        auto& socket = unblocking_sockets.emplace_back(io_context);
+                        socket.connect(asio::local::stream_protocol::endpoint(
+                                           entry.path().string()),
+                                       err);
+                    }
+
+                    while (!st.stop_requested()) {
+                        std::this_thread::sleep_for(20ms);
+                    }
+
+                    return;
                 }
 
                 std::this_thread::sleep_for(20ms);
@@ -459,6 +486,13 @@ class PluginBridge {
         sockets_.connect();
 #ifndef WITH_WINEDBG
         host_watchdog_handler_.request_stop();
+        host_watchdog_handler_.join();
+
+        if (host_exited) {
+            throw std::runtime_error(
+                "The Wine plugin host exited before it could connect to the "
+                "plugin");
+        }
 #endif
     }
 
