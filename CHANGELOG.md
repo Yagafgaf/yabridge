@@ -38,6 +38,11 @@ Versioning](https://semver.org/spec/v2.0.0.html).
   the Wine plugin host's GUI thread, so the audio thread had to wait whenever the
   plugin's GUI was busy. yabridge now answers these queries directly for plugins
   that don't support PreSonus' gain reduction API.
+- The host no longer crashes when a Wine plugin host dies while the plugin is
+  still in use. Instead, yabridge shows a notification and the plugin outputs
+  silence until it is removed. VST2 plugins can simply be re-added, but VST3
+  plugins can only be restarted by restarting the host since the module stays
+  loaded.
 
 ### Removed
 
