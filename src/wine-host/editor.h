@@ -223,10 +223,13 @@ class Editor {
      */
     ~Editor() noexcept;
 
-    // Declaring the destructor removes the implicit move constructor, which the
-    // CLAP bridge needs. A moved-from editor has no X11 connection and its
-    // destructor won't do anything.
-    Editor(Editor&&) noexcept = default;
+    // The Win32 window procedure and the idle timer hold on to `this`, so an
+    // editor must never be moved after it has been created. Owners that need
+    // to be movable store it behind a `std::unique_ptr`.
+    Editor(const Editor&) = delete;
+    Editor& operator=(const Editor&) = delete;
+    Editor(Editor&&) = delete;
+    Editor& operator=(Editor&&) = delete;
 
     /**
      * Resize the `wrapper_window_` to this new size. We need to manually call
