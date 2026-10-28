@@ -17,6 +17,7 @@
 #include "process.h"
 
 #include <cassert>
+#include <cerrno>
 #include <iostream>
 
 #include <dlfcn.h>
@@ -289,18 +290,29 @@ Process::StringResult Process::spawn_get_stdout_line() const {
         fgets(output.data(), output.size(), output_pipe_stream);
     fclose(output_pipe_stream);
 
+    // `fgets()` returns the line feed, so we'll get rid of that
+    std::string output_str(output.data());
+    if (!output_str.empty() && output_str.back() == '\n') {
+        output_str.pop_back();
+    }
+
+    // If the host ignores `SIGCHLD`, then the child gets reaped automatically
+    // and `waitpid()` fails with `ECHILD`. We can't know the exit status in
+    // that case, so we'll go by whether the command printed anything.
     int status = 0;
-    [[maybe_unused]] const pid_t wait_result = waitpid(child_pid, &status, 0);
-    assert(wait_result > 0);
+    const pid_t wait_result = waitpid(child_pid, &status, 0);
+    if (wait_result < 0) {
+        assert(errno == ECHILD);
+        if (output_str.empty()) {
+            return Process::CommandNotFound{};
+        } else {
+            return output_str;
+        }
+    }
+
     if (!WIFEXITED(status) || WEXITSTATUS(status) == 127) {
         return Process::CommandNotFound{};
     } else {
-        // `fgets()` returns the line feed, so we'll get rid of that
-        std::string output_str(output.data());
-        if (output_str.back() == '\n') {
-            output_str.pop_back();
-        }
-
         return output_str;
     }
 }
@@ -318,9 +330,14 @@ Process::StatusResult Process::spawn_get_status() const {
         return std::error_code(result, std::system_category());
     }
 
+    // See `spawn_get_stdout_line()`. Without the exit status there's nothing
+    // meaningful we can return here, so we'll return the error instead.
     int status = 0;
-    [[maybe_unused]] const pid_t wait_result = waitpid(child_pid, &status, 0);
-    assert(wait_result > 0);
+    const pid_t wait_result = waitpid(child_pid, &status, 0);
+    if (wait_result < 0) {
+        return std::error_code(errno, std::system_category());
+    }
+
     if (!WIFEXITED(status) || WEXITSTATUS(status) == 127) {
         return Process::CommandNotFound{};
     } else {
@@ -427,10 +444,12 @@ Process::HandleResult Process::spawn_child_piped(
     // exist, but the specification says that it should return a PID that exits
     // with status 127 instead. I have no idea how we'd check for that without
     // waiting here though, so this check may not work
+    // This fails with `ECHILD` if the host ignores `SIGCHLD` and the child
+    // already exited, in which case we can't check the exit status
     int status = 0;
     [[maybe_unused]] const pid_t wait_result =
         waitpid(child_pid, &status, WNOHANG);
-    assert(wait_result >= 0);
+    assert(wait_result >= 0 || errno == ECHILD);
     if (WIFEXITED(status) && WEXITSTATUS(status) == 127) {
         return Process::CommandNotFound{};
     } else {
@@ -467,10 +486,12 @@ Process::HandleResult Process::spawn_child_redirected(
         return std::error_code(result, std::system_category());
     }
 
+    // This fails with `ECHILD` if the host ignores `SIGCHLD` and the child
+    // already exited, in which case we can't check the exit status
     int status = 0;
     [[maybe_unused]] const pid_t wait_result =
         waitpid(child_pid, &status, WNOHANG);
-    assert(wait_result >= 0);
+    assert(wait_result >= 0 || errno == ECHILD);
     if (WIFEXITED(status) && WEXITSTATUS(status) == 127) {
         return Process::CommandNotFound{};
     } else {
