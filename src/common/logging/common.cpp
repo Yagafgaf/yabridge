@@ -22,6 +22,7 @@
 #include <iomanip>
 #include <iostream>
 #include <mutex>
+#include <stdexcept>
 
 /**
  * The environment variable indicating whether to log to a file. Will log to
@@ -77,7 +78,8 @@ Logger Logger::create_from_environment(std::string prefix,
     Verbosity verbosity_level;
     try {
         verbosity_level = static_cast<Verbosity>(std::stoi(verbosity));
-    } catch (const std::invalid_argument&) {
+    } catch (const std::logic_error&) {
+        // Both `std::invalid_argument` and `std::out_of_range`
         verbosity_level = Verbosity::basic;
     }
 
