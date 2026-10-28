@@ -28,6 +28,10 @@ Versioning](https://semver.org/spec/v2.0.0.html).
   sides of the screen.
 - Similarly, popups should no longer spuriously appear in the wrong placeo n
   screen. This mostly affected _MeldaProduction_ plugin
+- Fixed a race condition when closing an editor that could make the Wine
+  plugin host exit with an X11 `BadWindow` error, taking the host down with it.
+  This was easy to trigger in **REAPER** by quickly switching between plugins
+  in the FX chain window.
 
 ### Removed
 

@@ -118,11 +118,30 @@ class DeferredWin32Window {
      */
     ~DeferredWin32Window() noexcept;
 
+    // A moved-from instance has no X11 connection and won't close anything
+    DeferredWin32Window(DeferredWin32Window&&) noexcept = default;
+
+    /**
+     * Keep the X11 window `handle_`'s X11 window is embedded in alive until
+     * Wine has destroyed `handle_`. Otherwise destroying that window would also
+     * destroy Wine's window from the outside, while Wine may still be using it.
+     * If Wine then runs into a `BadWindow` error, Xlib's default error handler
+     * terminates the entire plugin host.
+     *
+     * @param window The window containing `handle_`'s X11 window. This should
+     *   already be unmapped and detached from the host's window.
+     */
+    void destroy_after_close(X11Window window) noexcept;
+
     const HWND handle_;
 
    private:
     MainContext& main_context_;
     std::shared_ptr<xcb_connection_t> x11_connection_;
+    /**
+     * Set through `destroy_after_close()`.
+     */
+    std::optional<X11Window> outer_window_;
 };
 
 /**
@@ -196,6 +215,18 @@ class Editor {
         const size_t parent_window_handle,
         std::optional<fu2::unique_function<void()>> timer_proc = std::nullopt,
         std::optional<Size> initial_size = std::nullopt);
+
+    /**
+     * Detach `wrapper_window_` from the host's window and hand it to
+     * `win32_window_` so it outlives Wine's window. See
+     * `DeferredWin32Window::destroy_after_close()`.
+     */
+    ~Editor() noexcept;
+
+    // Declaring the destructor removes the implicit move constructor, which the
+    // CLAP bridge needs. A moved-from editor has no X11 connection and its
+    // destructor won't do anything.
+    Editor(Editor&&) noexcept = default;
 
     /**
      * Resize the `wrapper_window_` to this new size. We need to manually call
