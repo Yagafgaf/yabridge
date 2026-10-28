@@ -400,7 +400,7 @@ class SocketHandler {
         std::error_code err;
         socket_.shutdown(asio::local::stream_protocol::socket::shutdown_both,
                          err);
-        socket_.close();
+        socket_.close(err);
     }
 
     /**
@@ -609,13 +609,14 @@ class AdHocSocketHandler {
         std::error_code err;
         socket_.shutdown(asio::local::stream_protocol::socket::shutdown_both,
                          err);
-        socket_.close();
+        socket_.close(err);
 
-        while (currently_listening_) {
-            // If another thread is currently calling `receive_multi()`, we'll
-            // spinlock until that function has exited. We would otherwise get a
-            // use-after-free when this object is destroyed from another thread.
-        }
+        // If another thread is currently calling `receive_multi()`, we'll wait
+        // until that function has exited. We would otherwise get a
+        // use-after-free when this object is destroyed from another thread.
+        // This used to spin, burning a core for as long as the listener was
+        // busy.
+        currently_listening_.wait(true);
     }
 
    protected:
@@ -802,6 +803,7 @@ class AdHocSocketHandler {
         acceptor_.reset();
 
         currently_listening_ = false;
+        currently_listening_.notify_all();
     }
 
     /**
