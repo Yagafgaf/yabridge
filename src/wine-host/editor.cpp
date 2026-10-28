@@ -211,22 +211,62 @@ DeferredWin32Window::DeferredWin32Window(
       main_context_(main_context),
       x11_connection_(x11_connection) {}
 
+/**
+ * Drop `window` once Wine has destroyed `handle`, checking every 100 ms. If
+ * that hasn't happened after `attempts_left` checks, then `window` gets dropped
+ * anyways.
+ */
+void destroy_once_closed(std::shared_ptr<asio::steady_timer> timer,
+                         HWND handle,
+                         std::shared_ptr<X11Window> window,
+                         int attempts_left) {
+    timer->expires_after(100ms);
+    timer->async_wait([timer, handle, window = std::move(window),
+                       attempts_left](const std::error_code& error) mutable {
+        if (!error && attempts_left > 0 && IsWindow(handle)) {
+            destroy_once_closed(std::move(timer), handle, std::move(window),
+                                attempts_left - 1);
+        }
+
+        // Otherwise `window` gets destroyed together with this handler
+    });
+}
+
 DeferredWin32Window::~DeferredWin32Window() noexcept {
+    // This window has been moved from
+    if (!x11_connection_) {
+        return;
+    }
+
     // NOTE: For some rason, Wine will sometimes try to delete a window twice if
     //       the parent window no longer exists. I've only seen this cause
     //       issues with plugins that hang when their window is hidden, like the
     //       iZotope Rx plugins. In Renoise this would otherwise trigger an X11
     //       error every time you close such a plugin's editor, and in other
     //       DAWs I've also seen it happen from time to time.
-    try {
-        const xcb_window_t wine_window = get_x11_handle(handle_);
-        const xcb_window_t root_window =
-            get_root_window(*x11_connection_, wine_window);
-        xcb_reparent_window(x11_connection_.get(), wine_window, root_window, 0,
-                            0);
-    } catch (const std::runtime_error& error) {
-        // If we can't reparent the window (or, well, fetch the root window),
-        // then that's not a big deal here
+    //       When `outer_window_` is set the parent window stays alive until
+    //       Wine has destroyed its window, so we don't need to do this.
+    if (!outer_window_) {
+        try {
+            const xcb_window_t wine_window = get_x11_handle(handle_);
+            const xcb_window_t root_window =
+                get_root_window(*x11_connection_, wine_window);
+            xcb_reparent_window(x11_connection_.get(), wine_window, root_window,
+                                0, 0);
+        } catch (const std::runtime_error& error) {
+            // If we can't reparent the window (or, well, fetch the root
+            // window), then that's not a big deal here
+        }
+    }
+
+    std::shared_ptr<X11Window> outer_window;
+    if (outer_window_) {
+        try {
+            outer_window =
+                std::make_shared<X11Window>(std::move(*outer_window_));
+        } catch (const std::bad_alloc&) {
+            // The window will be destroyed right away instead
+        }
     }
 
     // XXX: We are already deferring this closing by posting `WM_CLOSE` to the
@@ -245,8 +285,9 @@ DeferredWin32Window::~DeferredWin32Window() noexcept {
         // don't have to manage the timer instance ourselves as it will just
         // clean itself up after this lambda gets called.
         destroy_timer->async_wait(
-            [destroy_timer, handle = handle_,
-             x11_connection = x11_connection_](const std::error_code& error) {
+            [destroy_timer, handle = handle_, x11_connection = x11_connection_,
+             outer_window =
+                 std::move(outer_window)](const std::error_code& error) mutable {
                 if (error) {
                     return;
                 }
@@ -259,11 +300,22 @@ DeferredWin32Window::~DeferredWin32Window() noexcept {
                 // The actual destroying will happen as part of the Win32
                 // message loop
                 PostMessage(handle, WM_CLOSE, 0, 0);
+
+                // Wine's window lives inside of `outer_window`, so that can
+                // only be destroyed after Wine has handled the message above
+                if (outer_window) {
+                    destroy_once_closed(std::move(destroy_timer), handle,
+                                        std::move(outer_window), 50);
+                }
             });
     } catch (const std::bad_alloc&) {
         // If we can't allocate the timer, then we probably have bigger worries
         // than not cleaning up a window
     }
+}
+
+void DeferredWin32Window::destroy_after_close(X11Window window) noexcept {
+    outer_window_.emplace(std::move(window));
 }
 
 Editor::Editor(MainContext& main_context,
@@ -397,6 +449,35 @@ Editor::Editor(MainContext& main_context,
     xcb_flush(x11_connection_.get());
 
     do_reparent(wine_window_, wrapper_window_.window_);
+}
+
+Editor::~Editor() noexcept {
+    // This editor has been moved from
+    if (!x11_connection_) {
+        return;
+    }
+
+    // NOTE: The host will destroy its window right after this, and the X server
+    //       would then destroy `wrapper_window_` and Wine's window along with
+    //       it. Wine may still be querying that window, and the resulting
+    //       `BadWindow` error makes Xlib terminate the plugin host. This was
+    //       easy to trigger in REAPER by switching between plugins in the FX
+    //       chain window. Instead we'll move the wrapper window to the root
+    //       window, and we'll only destroy it after Wine has destroyed its own
+    //       window. Wine's window is not touched, so to Wine nothing changes
+    //       until it handles the `WM_CLOSE` message.
+    try {
+        const xcb_window_t root_window =
+            get_root_window(*x11_connection_, wrapper_window_.window_);
+        xcb_unmap_window(x11_connection_.get(), wrapper_window_.window_);
+        xcb_reparent_window(x11_connection_.get(), wrapper_window_.window_,
+                            root_window, 0, 0);
+        xcb_flush(x11_connection_.get());
+    } catch (const std::runtime_error&) {
+        // The window is already gone, so there's nothing left to rescue
+    }
+
+    win32_window_.destroy_after_close(std::move(wrapper_window_));
 }
 
 void Editor::resize(uint16_t width, uint16_t height) {

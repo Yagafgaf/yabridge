@@ -32,6 +32,10 @@ Versioning](https://semver.org/spec/v2.0.0.html).
   _Element_ does. In that case child processes are reaped automatically and
   `waitpid()` fails with `ECHILD`, which yabridge used to treat as a fatal
   error.
+- Fixed a race condition when closing an editor that could make the Wine
+  plugin host exit with an X11 `BadWindow` error, taking the host down with it.
+  This was easy to trigger in **REAPER** by quickly switching between plugins
+  in the FX chain window.
 
 ### Removed
 
