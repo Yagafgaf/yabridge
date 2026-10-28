@@ -178,7 +178,8 @@ class Process {
         void detach() noexcept;
 
         /**
-         * Forcefully terminate the process by sending `SIGKILL`. Will reap the
+         * Terminate the process by sending `SIGINT` (see
+         * `IndividualHost::terminate()` for why not `SIGKILL`). Will reap the
          * process zombie after sending the signal.
          */
         void terminate() const noexcept;
@@ -197,6 +198,15 @@ class Process {
         bool detached_ = false;
 
         pid_t pid_ = 0;
+
+        /**
+         * A pidfd for the process, or -1 if the kernel doesn't support them
+         * (Linux 5.3+). A host that ignores `SIGCHLD` reaps our children
+         * automatically, after which `pid_` may be reused by an unrelated
+         * process. Signalling and waiting through the pidfd can never reach
+         * that other process.
+         */
+        int pidfd_ = -1;
     };
 
     using StringResult =

@@ -22,7 +22,14 @@
 
 #include <dlfcn.h>
 #include <spawn.h>
+#include <poll.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
+#include <unistd.h>
+
+#ifndef P_PIDFD
+#define P_PIDFD 3
+#endif
 
 namespace fs = ghc::filesystem;
 
@@ -194,25 +201,43 @@ char* const* ProcessEnvironment::make_environ() const {
     return const_cast<char* const*>(recreated_environ_.data());
 }
 
-Process::Handle::Handle(pid_t pid) : pid_(pid) {}
+Process::Handle::Handle(pid_t pid)
+    : pid_(pid), pidfd_(static_cast<int>(syscall(SYS_pidfd_open, pid, 0))) {}
 
 Process::Handle::~Handle() {
     if (!detached_) {
         // If this function has already been called then that's okay
         terminate();
     }
+
+    if (pidfd_ >= 0) {
+        close(pidfd_);
+    }
 }
 
 Process::Handle::Handle(Handle&& o) noexcept
-    : detached_(o.detached_), pid_(o.pid_) {
+    : detached_(o.detached_), pid_(o.pid_), pidfd_(o.pidfd_) {
     o.detached_ = true;
+    o.pidfd_ = -1;
 }
 
 Process::Handle& Process::Handle::operator=(Handle&& o) noexcept {
-    o.detached_ = true;
+    if (this != &o) {
+        // The process we owned until now would otherwise be left running
+        if (!detached_) {
+            terminate();
+        }
+        if (pidfd_ >= 0) {
+            close(pidfd_);
+        }
 
-    detached_ = o.detached_;
-    pid_ = o.pid_;
+        detached_ = o.detached_;
+        pid_ = o.pid_;
+        pidfd_ = o.pidfd_;
+
+        o.detached_ = true;
+        o.pidfd_ = -1;
+    }
 
     return *this;
 }
@@ -222,6 +247,13 @@ pid_t Process::Handle::pid() const noexcept {
 }
 
 bool Process::Handle::running() const noexcept {
+    // A pidfd becomes readable once the process has exited, including when
+    // it's a zombie
+    if (pidfd_ >= 0) {
+        pollfd poll_fd{.fd = pidfd_, .events = POLLIN, .revents = 0};
+        return poll(&poll_fd, 1, 0) == 0;
+    }
+
     return pid_running(pid_);
 }
 
@@ -230,17 +262,40 @@ void Process::Handle::detach() noexcept {
 }
 
 void Process::Handle::terminate() const noexcept {
-    kill(pid_, SIGINT);
+    if (pidfd_ >= 0) {
+        syscall(SYS_pidfd_send_signal, pidfd_, SIGINT, nullptr, 0);
+    } else {
+        kill(pid_, SIGINT);
+    }
     wait();
 }
 
 std::optional<int> Process::Handle::wait() const noexcept {
     // This may fail if we've already reaped the process and terminate gets
-    // called another time, so we won't check the result here
-    int status = 0;
-    waitpid(pid_, &status, 0);
+    // called another time, or if the host ignores `SIGCHLD` and the process
+    // has been reaped automatically. In both cases there's no exit code.
+    if (pidfd_ >= 0) {
+        siginfo_t info{};
+        int result;
+        do {
+            result = waitid(static_cast<idtype_t>(P_PIDFD),
+                            static_cast<id_t>(pidfd_), &info, WEXITED);
+        } while (result < 0 && errno == EINTR);
 
-    if (WIFEXITED(status)) {
+        if (result == 0 && info.si_code == CLD_EXITED) {
+            return info.si_status;
+        } else {
+            return std::nullopt;
+        }
+    }
+
+    int status = 0;
+    pid_t result;
+    do {
+        result = waitpid(pid_, &status, 0);
+    } while (result < 0 && errno == EINTR);
+
+    if (result == pid_ && WIFEXITED(status)) {
         return WEXITSTATUS(status);
     } else {
         return std::nullopt;
