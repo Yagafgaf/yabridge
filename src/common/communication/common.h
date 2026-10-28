@@ -301,8 +301,19 @@ class Sockets {
             //       there's now a safeguard against that very thing. Hopefully
             //       this should never be needed, but if it is, then I'm glad
             //       we'll have it!
-            const ghc::filesystem::path temp_dir = get_temporary_directory();
-            if (base_dir_.string().starts_with(temp_dir.string())) {
+            //       A plain prefix check would also accept the temporary
+            //       directory itself, `<temp>/..`, or a sibling directory that
+            //       happens to share the prefix, so the directory has to be a
+            //       direct child of the temporary directory with the name
+            //       `generate_endpoint_base()` gives it.
+            // Going through a child path also drops any trailing slash
+            const ghc::filesystem::path temp_dir =
+                (get_temporary_directory() / "child")
+                    .lexically_normal()
+                    .parent_path();
+            const ghc::filesystem::path base_dir = base_dir_.lexically_normal();
+            if (base_dir.parent_path() == temp_dir &&
+                base_dir.filename().string().starts_with("yabridge-")) {
                 ghc::filesystem::remove_all(base_dir_);
             } else {
                 Logger logger = Logger::create_exception_logger();
