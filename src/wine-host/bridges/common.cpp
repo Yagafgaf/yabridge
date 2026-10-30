@@ -20,8 +20,37 @@
 #include <iostream>
 #include <optional>
 
+#include <cstdarg>
+#include <cstdio>
+#include <windows.h>
+
 #include "../../common/process.h"
 #include "../editor.h"
+
+// TEMPORARY diagnostics: log the Win32 messages yabridge dispatches to the
+// plugin so we can see whether it ever repaints. Remove when done.
+static void msg_log(const char* fmt, ...) {
+    static HANDLE file = 0;
+    if (!file) {
+        char path[256];
+        snprintf(path, sizeof(path), "Z:\\tmp\\opencode\\yabridge-msgs-%lu.log",
+                 (unsigned long)GetCurrentProcessId());
+        file = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           nullptr, OPEN_ALWAYS, 0, nullptr);
+        if (file == INVALID_HANDLE_VALUE) {
+            file = (HANDLE)-1;
+        }
+    }
+    if (file == (HANDLE)-1) return;
+
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    int len = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    DWORD written;
+    WriteFile(file, buf, (DWORD)len, &written, nullptr);
+}
 
 /**
  * The maximum number of Win32 messages to handle per message loop. This is
@@ -105,6 +134,33 @@ void HostBridge::handle_events() noexcept {
     int limit = max_win32_messages;
     for (int i = 0; i < limit && PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE);
          i++) {
+        switch (msg.message) {
+            case WM_PAINT:
+            case WM_TIMER:
+            case WM_SHOWWINDOW:
+            case WM_SIZE:
+            case WM_MOVE:
+            case WM_ERASEBKGND:
+            case WM_LBUTTONDOWN:
+            case WM_LBUTTONUP:
+            case WM_MOUSEMOVE:
+            case WM_SETCURSOR:
+            case WM_ACTIVATE:
+            case WM_NCACTIVATE:
+            case WM_DISPLAYCHANGE:
+            case WM_THEMECHANGED:
+            case WM_DPICHANGED: {
+                msg_log("msg %04x hwnd %p wp %llx lp %llx\n", msg.message, msg.hwnd,
+                        (unsigned long long)msg.wParam, (unsigned long long)msg.lParam);
+                break;
+            }
+            default:
+                if (msg.message == juce_message_id) {
+                    msg_log("msg JUCE %04x hwnd %p wp %llx lp %llx\n", msg.message, msg.hwnd,
+                            (unsigned long long)msg.wParam, (unsigned long long)msg.lParam);
+                }
+                break;
+        }
         // HACK: See the docstring on `juce_win32_message_limit`
         if (msg.message == juce_message_id) {
             limit = extended_max_win32_messages;
